@@ -1,0 +1,11 @@
+# Stop Making The Web Harder Than It Is; Real-world REST, HATEOAS, and Hypermedia APIs with Magpie
+
+## Abstract
+
+Developing for the Web shouldn't be hard. Yet, many smart developers make it harder than it needs to be by choosing tools and frameworks that do not fully take advantage of all that HTTP has to offer. This talk demonstrates how projects at all levels-- from the simplest brochureware site to the most advanced Hypermedia APIs-- can be made simpler by getting back to the basics of HTTP. We introduce Tamarou's internal application development and publishing framework Magpie (scheduled for public release to coincide with YAPC::NA) and step through as series of real-world examples to show how its Resource-oriented approach to development keeps simple things simple and makes hard things easier. Topics include:
+
+* Why MVC is the wrong way to think about Web development.
+* Why most frameworks that claim to be RESTful aren't (and how that makes life harder)
+* An brief introduction to Resource-oriented development.
+* A quick tour of Magpie's top-level features.
+* A series of production-tested Magpie recipes covering the gamut of Web-dev from simple templated sites through advanced Hypermedia applications.
