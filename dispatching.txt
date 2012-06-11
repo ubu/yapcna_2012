@@ -1,0 +1,462 @@
+Howdy!
+
+First, WWW::DataWiki looks really cool. I love the idea of storing the
+graphs as gzipped N3 instead of parsing/loading them into an abstract
+model that will never round-trip.
+
+You asked a lot of great questions so let's get right to it...
+
+On 4/5/12 5:30 AM, Toby Inkster wrote:
+
+::snip::
+
+> So why do I think Catalyst is a poor fit for this project? Catalyst,
+> like many other web frameworks (in Perl and elsewhere), uses a
+> Model-View-Controller structure. Two of those three components are
+> more or less irrelevent to my projects, but other concepts I'd
+> consider key aren't provided by Catalyst. It is no doubt a good fit
+> for some projects, but not mine.
+
+The use of MVC in Web app development was certainly a giant leap forward
+from what preceded it but it's still like pounding a square peg into a
+round hole for mane, many projects. I'm biased, obviously, but I find
+Resource-oriented development to be a much better fit for the Web both
+practically and conceptually-- not only for RESTful service APIs but for
+good ol' the-only-client-is-a-browser apps.
+
+::many insightful criticisms of MVC snipped for length::
+
+
+> Good things in Catalyst to not lose sight of:
+>
+> 1. Catalyst controllers provide a pretty good solution for
+> dispatching. That said, dispatching isn't rocket science.
+
+It isn't rocket science but how Magpie approaches dispatching is already
+a bit of an FAQ because it departs significantly from what is common in
+REST-on-MVC frameworks. There's a lot to cover here so here's hoping I
+won't pound you over the head with too much tl;dr
+
+When you talk about dispatching you're really talking about two separate
+things:
+
+1) which components (classes) should be used to construct the response
+to this request?
+
+2) which events (object methods) within those components should be fired
+to take the appropriate actions to construct that response?
+
+A big part of where REST-on-MVC frameworks make life harder is in the
+fact that they elevate the URL path over every aspect of the request and
+then bind the code that will be executed directly to those paths. In
+many frameworks (looking at you Rails) this tight coupling and
+conflation of code path and request path is the sum of their dispatching
+mechanism. In Magpie, we cleanly separate the two and the only
+connection are the ones you explicitly make via the config.
+
+Magpie has several different options for mapping URLs to Resource
+pipelines. If you want to see them all in action taking a tour through
+the test suite (especially the t/core/sugar_match* tests) shows all the
+options, but here a quick overview:
+
+There are two ways to configure your applications, via a DSL baked into
+Plack::Middleware::Magpie and as separate XML config file. Functionally,
+they are identical so I'll just focus on the builder DSL here. It helps
+to see a tiny sample app.psgi:
+
+    use Plack::Buider;
+    use Plack::Middleware::Magpie;
+
+
+    my $app = builder {
+        enable "Magpie", pipeline => [
+        'MyApp::Resource'
+        ];
+    };
+
+    $app;
+
+The above is the simplest Magpie app possible. It unconditionally adds
+MyApp::Resource to the pipeline. When a request comes in, it is
+immediately passed to a pipeline containing that single class to
+construct the response. Simple, but not very realistic. MyApp::Resource
+would likely become an overcomplicated mess in a hurry-- that one class
+would have to do everything itself under every possible condition-- but
+let's say you start there. The app evolves and soon you decide that
+things would be much easier if you could separate the parts of the code
+that fetch the data to serve from the parts that serialize those data
+and construct the response. You're only serving JSON to the clients so
+it's easy enough to put all that logic in one place. Now your pipeline
+has two components:
+
+    enable "Magpie", pipeline => [
+        'MyApp::Resource',
+        'MyApp::Serializer,
+    ];
+
+Now MyApp::Resource is a bit simpler; it's only concerned with composing
+the data required to serve the request and MyApp::Serializer can focus
+solely on winding that data out into the JSON you want to serve. Better,
+but MyApp::Resource still has to interpret the intent of every request
+to know which data to grab.
+
+Imagine that, as the system grows, you find there's a clear distinction
+between two types of data you're trying to serve: Widgets are/do one
+thing and Doodads are/do something else. By now you've probably started
+following the convention of groping the request's path to differentiate
+which specific kind of resource the client is asking for. Requests with
+the path /widget serve Widget data and /doodad serves Doodad data. Fine,
+but Widgets and Doodads are different enough that having to
+conditionally construct the data representing one or the other in the
+same place is is messy and inefficient. Enter Magpie's simplest matcher
+(keyword, unsurprisingly, match()):
+
+    enable "Magpie", pipeline => [
+    machine {
+            match '/widget' => ['MyApp::Resource::Widget'];
+            match '/doodad' => ['MyApp::Resource::Doodad'];
+        },
+        'MyApp::Serializer
+    ];
+
+Pretty obvious. Now, when a request comes in whose path exactly matches
+'/widget', the MyApp::Resource::Widget class is added to the pipeline
+while those matching '/doodad' add the MyApp::Resource::Doodad class
+instead. The same generic serializer works for both types of resources
+so we add that unconditionally to the end of the pipeline.
+
+Well, so what? Up to this point we've basically recreated the type of
+dispatching typically seen in most REST-on-MVC systems. But notice
+something: Nothing about our app's URL structure is directly tied to the
+component classes used to construct the response. No hard-coded mappings
+from path steps to methods; no implicit assumptions about class
+hierarchy and path depth; no presumptions at all about what a resource
+is, how it is composed, where or how its data is stored internally. In
+short, we've already removed much of the needless pain that comes from
+most REST-on-MVC frameworks.
+
+Note, too, that the 'match' function accepts both literal strings (as in
+our example) or regular expressions, so you can easily cope with the
+'/foo' vs. /foo/ case you mentioned in your post. Indeed, you could use
+that distinction to load different resource classes altogether:
+
+    enable "Magpie", pipeline => [
+    machine {
+            match qr|/widget$| => ['MyApp::Resource::WidgetCollection'];
+            match qr|/widget/.+| => ['MyApp::Resource::Widget'];
+
+            match qr|/doodad$| => ['MyApp::Resource::DoodadCollection'];
+            match qr|/doodad/.+| => ['MyApp::Resource::Doodad'];
+        },
+        'MyApp::Serializer
+    ];
+
+Now a request to http://host.tld/widget loads the resource class for
+composing collections of widget data while one to
+http://host.tld/widget/xxx-yyy-zzz could be used to retrieve the
+representation of a single widget.
+
+The 'match' keyword is very flexible but there are several other options
+for mapping requests to component pipelines.
+
+match_accept, for example, lets you set up a content negotiation matrix
+(ala HTTP::Negotiate) then choose components based on weighted matches
+against the request's Accept* headers:
+
+    my $matrix = [
+        ['xml'  => 1.0, 'text/xml', undef,  undef, undef, undef],
+        ['json' => 1.0, 'application/json', undef, undef, undef, undef],
+    ];
+
+    enable "Magpie", accept_matrix => $matrix, pipeline => [
+    machine {
+            match qr|/widget$| => ['MyApp::Resource::WidgetCollection'];
+            match qr|/widget/.+| => ['MyApp::Resource::Widget'];
+
+            match qr|/doodad$| => ['MyApp::Resource::DoodadCollection'];
+            match qr|/doodad/.+| => ['MyApp::Resource::Doodad'];
+
+            match_accept 'json' => ['MyApp::Serializer::JSON'];
+            match_accept 'xml'  => ['MyApp::Serializer::XML'];
+        }
+    ];
+
+Now, not only can clients can ask for any of the widget and doodad
+resources and get the data in the format they can grok simply by setting
+a content type header, your serializers *also* don't have to know or
+care about any other format besides the one they specialize in. More
+importantly, our Resource classes don't have to know or care about how
+their internal representations get serialized: the just compose the data
+and pass it along down the pipeline.
+
+For brevity's sake (too late) I won't go into detail, but Magpie also
+offers match_env that takes a hashref of key/(literal|rexep) pairs for
+conditionally loading components based on matches against the PSGI
+environment hash, and match_template that offers a way to do regular
+expression matching with URI template-style variable extraction so that
+if you do:
+
+  match_template qr|/widget/{widget_id}| => ['MyApp::Resource::Widget'];
+
+that Resource class can ask for $self->uri_template_params->{widget_id}
+
+to unambiguously get the entity ID (or know that it's missing) without
+having to grope the request path internally.
+
+Lots of options and I've really only scratched the surface here. The
+important thing to take away, though, is that unlike the REST-on-MVC
+frameworks (and even many "pure REST" ones) you're free to design both
+the public URLs for your Resources and the code that constructs the
+representations of those Resources in the way that makes the most
+meaningful sense without coupling the code to the request path.
+
+So, that's a look at the "which components classes will be used" part of
+dispatching but what about the "which methods in those components will
+be applied" part? The short anwser is: it's up to you!
+
+At it's core, Magpie's processing pipeline is really just a linear state
+machine. You load the pipeline with component classes and, as each class
+is loaded in turn, it registers the possible events (class methods) for
+that component. Then, as each request comes in, each class has chance to
+examine the request and return an ordered list of the events (methods)
+that will be applied to that request. To make things more convenient,
+there are a number of standard event dispatchers in the
+Magpie::Dispatcher::* namespace. Pick the one which best models the
+needs of that component, implement the event subs, and you're done.
+
+Most Resource classes (and all of the standard Magpie::Resource::* base
+classes) use Magpie::Dispatcher::RequestMethod to handle their event
+dispatching. Let's keep our silly Widget/Doodad example going and show
+what the MyApp::Resource::Widget component might actually look like:
+
+    package MyApp::Resource::Widget;
+    use Moose;
+    extends 'Magpie::Resource';
+    use Magpie::Constants;
+
+    sub GET {
+        my ($self, $context) = @_;
+        $self->parent_handler->resource($self);
+
+        my $data = $self->however_you_get_widget_data(%some_args);
+
+        unless ($data) {
+            $self->set_error({
+                status_code => 404,
+                reason => 'Resource not found.'
+            });
+            return OK;
+        }
+
+        $self->data($data);
+        return OK;
+    }
+
+    1;
+
+Behind the scenes, the Magpie::Resource base class (which our Widget
+class extends) uses Magpie::Dispatcher::RequestMethod. This registers a
+series of event methods which correspond to the standard set of HTTP
+verbs (GET, POST, PUT, DELETE, etc) and all we have to do is implement
+the events that we choose to support. At this point, our Widget Resource
+is read-only so we only have to implement the GET event, which is fired
+when the client makes an HTTP GET request for this resource. Note that,
+as a convenience, the Magpie::Resource base class has fallback event
+methods for all the the usual HTTP verbs which simply sets a 405 (Method
+Not Allowed) error, so if someone were to try to POST to the above
+Widget Resource they would get the appropriate error with no
+intervention on our part.
+
+Keep in mind, however, that Dispatcher::RequestMethod is only one
+possible event model. Magpie also ships with several others, including
+Dispatcher::RequestParam which provides CGI::Application-like event
+dispatching and you are always free to roll your own by registering your
+component's event subs and implementing a load_queue() method which will
+return a list of events to run for a given request. Want to dispatch
+events based on request headers? Go ahead. Want to do POST and PUT input
+validation before loading your Resource class to store the data? You can
+do that, too. The important thing to remember, though, is that choosing
+an event model for one component doesn't lock you into using that model
+for all components in the pipeline.
+
+All of that and I haven't even gotten to the part about how pipeline
+component classes can, themselves, alter the processing chain by adding
+and removing other component classes.
+
+I'm tempted to stop here as this really is turning into an epic but
+there's one other important contrast to draw between Magpie and
+REST-on-MVC systems. Where MVC really breaks down, IMO, is that it leads
+people to think of database tables and rows, objects stored in NoSQL
+stores, even documents on the filesystem as the Resource for which the
+client is asking. They're not. The Resource is nothing more or less than
+a predictable place to go to ask for a *representation* of those things.
+Your Resource might depend on access to a database table but that table
+is *not* the Resource. It seems clever at first to take an object
+hierarchy or DB schema and make it "RESTful" by generating a bit of CRUD
+code and some URL endoints but that way lies madness. It makes the first
+day of the project a little bit easier and every day that follows
+needlessly harder.
+
+So where do things like database connections, object stores, etc live in
+a Resource-oriented framework like Magpie? After all, it would suck to
+have to manage a DB connection in every pipeline component that needs it
+and, really, the encapsulated Model is a big part of what makes MVC
+frameworks convenient. In Magpie, these dependencies are stored in an
+application-wide Bread::Board container named Assets. If your Resources
+need database access, you simply create a service in the asset config
+that initializes the connection then those Resources which need that
+connection just do:
+
+    my $dbh = $self->resolve_asset( service => 'my_db_connection');
+
+All the simplicity and encapsulation of MVC's Model, with none of the
+conceptual lock-in that makes the rest of MVC a bad fit for RESTful app
+development.
+
+So, wow, this turned out to be a LOT longer than I'd expected but your
+thoughtful post deserved a detailed and thoughtful response. Does the
+above clarify Magpie's approach to dispatching, etc.? If not, please
+feel free to ask.
+
+In any case, back to your other questions...
+
+>
+> 2. The ability to build-up the HTTP response piecemeal is nice - to
+> be able to set the response body, and then in a later function tweak
+> a header.
+
+Easily done in Magpie since the response is available as an object
+method to all component classes via $self->response.
+
+>
+> 3. Ditto the wide availability of the HTTP request data. It's not
+> just my controller that can check the HTTP request headers - other
+> parts of my code can too.
+
+The full Plack::Request (including headers, request body, the PSGI
+environment hash, etc) is available to every pipeline component via
+$self->request
+
+>
+> 4. The context stash is great for laziness. Though deep down I know I
+> should really be writing accessors for the context object itself.
+
+Magpie tries very hard not to enforce One True Way(tm) in terms of
+app-level coding style. Sometimes, having transient data that gets
+passed along through the pipeline on each request just makes sense.
+Thus, every event method in each pipeline component is always passed two
+elements: the blessed instance of that class ($self) and a second scalar
+determined by whatever you passed via the middleware's 'context' argument.
+
+So, in your psgi script you might do:
+
+    use Plack::Builder;
+    use Plack::Middleware::Magpie;
+
+    my $context = {
+        some_arg => 'a value'
+    };
+
+    my $handler = builder {
+        enable "Magpie", context => $context, pipeline => [
+        'Some::AppLogic::Class'
+        ];
+    };
+
+... and, then, at runtime, each event fired in the My::Resource::Class
+and Some::AppLogic::Class pipeline component classes would get that
+anonymous hash reference as the second argument.
+
+   package 'My::Resource::Class';
+
+    sub some_event {
+        my ($self, $context) = @_;
+        # $context->{some_arg} is available here
+        $context->{a_different_arg} = 'something else';
+        ...
+    )
+
+Note that the context member is passed down the pipeline so by setting
+$context->{a_different_arg} that data is then available to all
+subsequent events called in both My::Resource::Class and
+Some::AppLogic::Class:
+
+    package 'Some::AppLogic::Class';
+
+    sub some_other_event {
+        my ($self, $context) = @_;
+        # $context->{some_arg} available here, too.
+        # and so is $context->{a_different_arg}
+        ...
+    )
+
+Magpie itself makes no demands on what that scalar represents so it
+could just as easily be an object:
+
+
+    use Plack::Builder;
+    use Plack::Middleware::Magpie;
+
+    my $context = Some::Complex::Object->new;
+
+    my $handler = builder {
+        enable "Magpie", context => $context, pipeline => [
+        'My::Resource::Class'
+        'Some::AppLogic::Class'
+        ];
+    };
+
+... and that object is passed along instead.
+
+Note that if you don't explicitly pass a context member in via the
+builder, the middleware falls back to passing in an empty anonymous
+hashref as a convenience.
+
+>
+> Another things to bear in mind: sometimes we need to follow a chain
+> of resources. For example, given a URL like:
+>
+> http://localhost/foo?query=SELECT+...
+>
+> I might initially dispatch to a resource object for
+> http://localhost/foo which represents an RDF graph. That object
+> notices the query string, executes the query and spawns a new
+> resource representing the query results. It's that new resource that
+> we actually need to serve back to the browser.
+>
+> It would be nice if Magpie provided a way of doing this elegantly.
+
+Two ways to approach this: First you could implement your Resource class
+to fetch the graph and then mix in a Role (or create a subclass) with an
+'after GET' method modifier to query the graph and replace $self->data()
+with the query result. The more Magpie-ish way would be to implement
+that behavior as seperate pipeline component which you would then add
+after the Reource class. I've solved similar problems using both
+approaches and they both work so choosing one over the other is really a
+matter of style and a question whether or not that component could be
+re-used in other Resource pipelines.
+
+>
+> Another random thought... should Resource really be a role rather
+> than a class? A role that I could compose with existing classes that
+> on their own know nothing about the Web?
+
+No, no, no, no! *ahem* Again, this goes back to the "Resource is not the
+Thing" point I was making earlier w.r.t. to MVC. I realize I'm fighting
+the tide of popular opinion on this but I've painted myself into that
+particular corner enough times to be able to say emphatically that it
+makes things much easier to think of Resources as something that has-a
+Object class that it represents rather than an Object class that does-a
+Resource interface. That said, I'm always open to learning new things so
+if you figure out a way to do that without incuring the constrains that
+tight coupling usually brings I *definitely* want to see what you come
+up with.
+
+>
+> Anyway, this has been the missive on Magpie that I've been promising
+> to write for quite a while. I hope it's been useful reading.
+
+Very useful indeed, and I hope my replies have been useful as well.
+
+Cheers,
+-kip
